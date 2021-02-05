@@ -217,13 +217,28 @@ extern "C" {
 
     /**
      * Set the profile name, overrides the LIXA_PROFILE environment variable
+     * Also clears any RMs added by tx_open_add_resource_manager()
      * @param[in] profile, NULL will remove the override, otherwise the profile must exist in the conf file
      * @return 0 = OK, non-zero = error
      */
     extern int lixa_tx_set_profile(const char *profile);
 
 
-    
+
+    /**
+     * Add a Resource Manager specification to the list loaded from the profile
+     * @param[in] name, Resource Manager from profile, if NULL then switchFile must be specified
+     * @param[in] switchFile, if 'name' is in the profile this will override the profile value
+     * @param[in] openInfo, optional, will override any profile value if non-NULL
+     * @param[in] closeInfo, optional, will override any profile value if non-NULL
+     * @return 0 = OK, non-zero = error
+     */
+     extern int lixa_tx_add_resource_manager(
+             const char *name,
+             const char *switchFile,
+             const char *openInfo,
+             const char *closeInfo );
+
 #ifdef __cplusplus
 }
 #endif /* __cplusplus */

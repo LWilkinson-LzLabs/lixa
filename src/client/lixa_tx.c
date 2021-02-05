@@ -62,23 +62,71 @@ int lixa_tx_set_profile(const char *profile) {
 
 
 
+static GSList* tx_open_resmgrs = NULL;
+
+typedef struct rsrmgr_spec_s {
+    const char* rmName;         /* Optional, if omitted rmSwitchFile Must be specified */
+    const char* rmSwitchFile;   /* Optional if rmName is in profile */
+    const char* rmOpenInfo;     /* Optional */
+    const char* rmCloseInfo;    /* Optional */
+} rsrmgr_spec_t;
+
+static void free_rsrmgr_spec( gpointer ptr) {
+    rsrmgr_spec_t* rm = (rsrmgr_spec_t*)ptr;
+    if (rm) {
+        if (rm->rmName) {
+            free((void*)rm->rmName);
+        }
+        if (rm->rmSwitchFile) {
+            free((void*)rm->rmSwitchFile);
+        }
+        if (rm->rmOpenInfo) {
+            free((void*)rm->rmOpenInfo);
+        }
+        if (rm->rmCloseInfo) {
+            free((void*)rm->rmCloseInfo);
+        }
+        free(rm);
+    }
+}
+
+int lixa_tx_add_resource_manager(
+        const char *name,
+        const char *switchFile,
+        const char *openInfo,
+        const char *closeInfo ) {
+    if ((NULL == name) && (NULL == switchFile)) {
+        // Must specify Resource Manager from profile, or switchFile
+        return 1;
+    }
+    rsrmgr_spec_t *p_rsrmgr_spec = malloc(sizeof(rsrmgr_spec_t));
+    if (NULL == p_rsrmgr_spec) {
+        return 2;
+    }
+    p_rsrmgr_spec->rmName = name ? strdup(name) : NULL;
+    p_rsrmgr_spec->rmSwitchFile = switchFile ? strdup(switchFile) : NULL;
+    p_rsrmgr_spec->rmOpenInfo = openInfo ? strdup(openInfo) : NULL;
+    p_rsrmgr_spec->rmCloseInfo = closeInfo ? strdup(closeInfo) : NULL;
+    tx_open_resmgrs = g_slist_append( tx_open_resmgrs, p_rsrmgr_spec );
+    return 0;
+}
+
+
 int lixa_tx_begin(int *txrc, XID *xid, int flags)
 {
-    enum Exception {
-        CLIENT_STATUS_FAILED,
-        STATUS_NOT_FOUND,
-        COLL_GET_CS_ERROR,
-        CONNECTION_CLOSED,
-        PROTOCOL_ERROR1,
-        INVALID_STATUS,
-        OUTSIDE_ERROR,
-        PROTOCOL_ERROR2,
-        LIXA_XA_START_ERROR1,
-        LIXA_XA_START_ERROR2,
-        GETTIMEOFDAY_ERROR,
-        XID_SERIALIZE_ERROR,
-        NONE
-    } excp;
+    enum Exception { CLIENT_STATUS_FAILED
+        , STATUS_NOT_FOUND
+        , COLL_GET_CS_ERROR
+        , CONNECTION_CLOSED
+        , PROTOCOL_ERROR1
+        , INVALID_STATUS
+        , OUTSIDE_ERROR
+        , PROTOCOL_ERROR2
+        , LIXA_XA_START_ERROR1
+        , LIXA_XA_START_ERROR2
+        , GETTIMEOFDAY_ERROR
+        , XID_SERIALIZE_ERROR
+        , NONE } excp;
     int ret_cod = LIXA_RC_INTERNAL_ERROR;
     client_status_t *cs = NULL;
 
@@ -347,6 +395,25 @@ int lixa_tx_close(int *txrc)
         if (LIXA_RC_OK != (ret_cod = lixa_xa_close(
                                &global_ccc, cs, &tmp_txrc)))
             THROW(LIXA_XA_CLOSE_ERROR);
+
+        /* remove dynamically added RMs */
+        int i;
+        for (i = 0; i < global_ccc.actconf.rsrmgrs->len; i++) {
+            struct act_rsrmgr_config_s *act_rsrmgr =
+                (struct act_rsrmgr_config_s *)
+                g_ptr_array_index(global_ccc.rsrmgrs, i);
+            if (act_rsrmgr->dynamically_defined) {
+                ret_cod = client_config_unload_switch_file(
+                                       act_rsrmgr);
+                if (NULL == act_rsrmgr->generic->name) {
+                    // Anonymous RM - remove it
+                    g_ptr_array_remove(global_ccc.rsrmgrs, act_rsrmgr->generic);
+                    g_free(act_rsrmgr->generic);
+                }
+                g_array_remove_index(global_ccc.actconf.rsrmgrs, i);
+                g_free(act_rsrmgr);
+            }
+        }
 
         THROW(NONE);
     } CATCH {
@@ -969,6 +1036,13 @@ int lixa_tx_open(int *txrc, int mmode)
         SHUTDOWN_ERROR,
         LIXA_XA_OPEN_ERROR,
         ALREADY_OPENED,
+        G_TRY_MALLOC_ERROR,
+        G_TRY_MALLOC_ERROR2,
+        STRDUP_ERROR,
+        STRDUP_ERROR2,
+        XML_STRDUP_ERROR,
+        CLIENT_CONFIG_LOAD_SWITCH_FILE_ERROR,
+        INVALID_RM_ERROR,
         NONE
     } excp;
     int ret_cod = LIXA_RC_INTERNAL_ERROR;
@@ -1013,6 +1087,95 @@ int lixa_tx_open(int *txrc, int mmode)
         if (txstate == TX_STATE_S0) {
             if (LIXA_RC_OK != (ret_cod = client_config(&global_ccc, TRUE, tx_open_profile)))
                 THROW(CLIENT_CONFIG_ERROR);
+
+           /* Add user-supplied RMs */
+            GSList *current_item = tx_open_resmgrs;
+            while (current_item) {
+                rsrmgr_spec_t *current_rsrmgr_spec = (rsrmgr_spec_t*)current_item->data;
+                struct rsrmgr_config_s *rsrmgr = NULL;      // Meant for Xml, but we use it here
+                struct act_rsrmgr_config_s *act_rsrmgr = NULL;
+                /* allocate a new record for the Resource Manager description */
+                if (NULL == (rsrmgr = g_try_malloc(
+                                sizeof(struct rsrmgr_config_s))))
+                    THROW(G_TRY_MALLOC_ERROR);
+                if (NULL == (act_rsrmgr = g_try_malloc(
+                                sizeof(struct act_rsrmgr_config_s))))
+                    THROW(G_TRY_MALLOC_ERROR2);
+
+                /* Populate the rsrmgr_config_s from the RM in the list */
+                /* First try to find an existing rsrmgr definition */
+                if (current_rsrmgr_spec->rmName) {
+                    rsrmgr->name = NULL;    /* Flag we have not found it yet */
+                    /* Loop through specified rsrmgrs */
+                    int i;
+                    for (i = 0; i < global_ccc.rsrmgrs->len; ++i) {
+                        struct rsrmgr_config_s *templateRsrmgr =
+                            (struct rsrmgr_config_s *)
+                            g_ptr_array_index(global_ccc.rsrmgrs, i);
+                        if (strcmp((char*)templateRsrmgr->name, current_rsrmgr_spec->rmName) == 0) {
+                            /* Found it - duplicate it and use it as a template */
+                            if (NULL == (rsrmgr->name = (xmlChar*)strdup( current_rsrmgr_spec->rmName ))) {
+                                g_free(rsrmgr);
+                                THROW(STRDUP_ERROR);
+                            }
+                            if (current_rsrmgr_spec->rmSwitchFile) {
+                                if (NULL == (rsrmgr->switch_file = (xmlChar*)strdup( current_rsrmgr_spec->rmSwitchFile ))) {
+                                    g_free(rsrmgr);
+                                    THROW(STRDUP_ERROR2);
+                                }
+                            } else {
+                                if (NULL == (rsrmgr->switch_file = xmlStrdup( templateRsrmgr->switch_file ))) {
+                                    g_free(rsrmgr);
+                                    THROW(XML_STRDUP_ERROR);
+                                }
+                            }
+                            if (current_rsrmgr_spec->rmOpenInfo) {
+                                strncpy( rsrmgr->xa_open_info, current_rsrmgr_spec->rmOpenInfo, sizeof(rsrmgr->xa_open_info) );
+                            } else {
+                                rsrmgr->xa_open_info[0] = 0;
+                            }
+                            if (current_rsrmgr_spec->rmCloseInfo) {
+                                strncpy( rsrmgr->xa_close_info, current_rsrmgr_spec->rmCloseInfo, sizeof(rsrmgr->xa_close_info) );
+                            } else {
+                                rsrmgr->xa_close_info[0] = 0;
+                            }
+                            LIXA_TRACE(("Resource Manager %s (%s) created\n", rsrmgr->name, rsrmgr->xa_open_info));
+                            break;
+                        }
+                    }
+                    if (rsrmgr->name == NULL) {
+                        /* Not found - error */
+                        LIXA_TRACE(("Resource Manager %s not defined\n", current_rsrmgr_spec->rmName));
+                        THROW(INVALID_RM_ERROR);
+                    }
+                } else {
+                    rsrmgr->name = NULL;    /* Anonymous */
+                    rsrmgr->switch_file = (xmlChar*)strdup( current_rsrmgr_spec->rmSwitchFile );
+                    strncpy( rsrmgr->xa_open_info, current_rsrmgr_spec->rmOpenInfo, sizeof(rsrmgr->xa_open_info) );
+                    strncpy( rsrmgr->xa_close_info, current_rsrmgr_spec->rmCloseInfo, sizeof(rsrmgr->xa_close_info) );
+                    LIXA_TRACE(("Resource Manager %s created\n", rsrmgr->switch_file));
+                }
+
+                act_rsrmgr->generic = rsrmgr;
+                act_rsrmgr->module = NULL;
+                memset(&act_rsrmgr->lixa_iface, 0, sizeof(lixa_iface_t));
+                act_rsrmgr->dynamically_defined = TRUE;
+
+                /* load the switch file for the resource manager,
+                * set it as "dynamically defined"  */
+                if (LIXA_RC_OK != (ret_cod = client_config_load_switch_file(
+                                    act_rsrmgr,
+                                    TRUE)))
+                    THROW(CLIENT_CONFIG_LOAD_SWITCH_FILE_ERROR);
+
+                client_config_display_rsrmgr( act_rsrmgr );
+                /* append the resource manager to the list of actual configured
+                resource managers */
+                client_config_append_rsrmgr(&global_ccc, rsrmgr,
+                                            act_rsrmgr);
+                current_item = g_slist_next(current_item);
+            }
+
             if (LIXA_RC_OK != (ret_cod = client_connect(cs, &global_ccc)))
                 THROW(CLIENT_CONNECT_ERROR);
             if (LIXA_RC_OK != (ret_cod = client_config_job(
@@ -1046,12 +1209,18 @@ int lixa_tx_open(int *txrc, int mmode)
                 case CLIENT_STATUS_COLL_REGISTER_ERROR:
                     break;
                 case ADDED_AND_NOT_FOUND:
+                case G_TRY_MALLOC_ERROR:
+                case G_TRY_MALLOC_ERROR2:
+                case STRDUP_ERROR:
+                case STRDUP_ERROR2:
+                case XML_STRDUP_ERROR:
                     ret_cod = LIXA_RC_INTERNAL_ERROR;
                     break;
                 case CLIENT_STATUS_COLL_GET_CS_ERROR:
                 case CLIENT_CONFIG_ERROR:
                 case CLIENT_CONNECT_ERROR:
                 case CLIENT_CONFIG_JOB_ERROR:
+                case CLIENT_CONFIG_LOAD_SWITCH_FILE_ERROR:
                     break;
                 case SHUTDOWN_ERROR:
                     ret_cod = LIXA_RC_SHUTDOWN_ERROR;
@@ -1065,6 +1234,10 @@ int lixa_tx_open(int *txrc, int mmode)
                 case ALREADY_OPENED:
                     ret_cod = LIXA_RC_BYPASSED_OPERATION;
                     *txrc = TX_OK;
+                    break;
+               case INVALID_RM_ERROR:
+                    ret_cod = LIXA_RC_CONFIG_ERROR;
+                    *txrc = TX_FAIL;
                     break;
                 case NONE:
                     *txrc = tmp_txrc;
