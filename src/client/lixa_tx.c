@@ -81,7 +81,7 @@ typedef struct rsrmgr_spec_s {
     const char* rmCloseInfo;    /* Optional */
 } rsrmgr_spec_t;
 
-static void free_rsrmgr_spec( gpointer ptr) {
+static void free_rsrmgr_spec( gpointer ptr, gpointer data) {
     rsrmgr_spec_t* rm = (rsrmgr_spec_t*)ptr;
     if (rm) {
         if (rm->rmName) {
@@ -400,6 +400,9 @@ int lixa_tx_close(int *txrc)
 
         /* Clear profile override */
         lixa_tx_set_profile(NULL);
+
+        /* Remove added Resource Managers */
+        g_slist_foreach( tx_open_resmgrs, free_rsrmgr_spec, NULL );
 
         /* update the TX state, now TX_STATE_S0; the result of XA calls
            must not be waited; see bug 3006369 */
@@ -1145,12 +1148,12 @@ int lixa_tx_open(int *txrc, int mmode)
                             if (current_rsrmgr_spec->rmOpenInfo) {
                                 strncpy( rsrmgr->xa_open_info, current_rsrmgr_spec->rmOpenInfo, sizeof(rsrmgr->xa_open_info) );
                             } else {
-                                rsrmgr->xa_open_info[0] = 0;
+                                strncpy( rsrmgr->xa_open_info, templateRsrmgr->xa_open_info, sizeof(rsrmgr->xa_open_info) );
                             }
                             if (current_rsrmgr_spec->rmCloseInfo) {
                                 strncpy( rsrmgr->xa_close_info, current_rsrmgr_spec->rmCloseInfo, sizeof(rsrmgr->xa_close_info) );
                             } else {
-                                rsrmgr->xa_close_info[0] = 0;
+                                strncpy( rsrmgr->xa_close_info, templateRsrmgr->xa_close_info, sizeof(rsrmgr->xa_close_info) );
                             }
                             LIXA_TRACE(("Resource Manager %s (%s) created\n", rsrmgr->name, rsrmgr->xa_open_info));
                             break;
