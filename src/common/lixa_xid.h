@@ -283,6 +283,15 @@ extern "C" {
     int lixa_xid_compare(const XID *a, const XID *b);
 
 
+
+    /**
+     * Set optional GTrid prefix
+     * @param[in] length of prefix in bytes
+     * @param[in] prefix data
+     * @return Prefix ok --> 0 <br>
+     *         Prefix length error --> 1 <br>
+     */
+    int lixa_xid_set_gtrid_prefix( int length, const char *prefix );
     
 #ifdef __cplusplus
 }

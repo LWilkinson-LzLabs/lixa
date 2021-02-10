@@ -56,6 +56,20 @@ uuid_t lixa_xid_global_bqual;
 #endif
 
 
+static int gtrid_prefix_length = 0;
+static char gtrid_prefix[MAXGTRIDSIZE - sizeof(uuid_t)];
+int lixa_xid_set_gtrid_prefix( int length, const char *prefix ) {
+    if ((length < 0) || (length > sizeof(gtrid_prefix))) {
+        return 1;
+    }
+    gtrid_prefix_length = length;
+    if (length>0) {
+        memcpy( gtrid_prefix, prefix, length );
+    }
+    return 0;
+}
+
+
 
 void lixa_xid_set_bqual(const char *md5_digest_hex,
                         uuid_t branch_qualifier)
@@ -91,21 +105,29 @@ void lixa_xid_create_new(uuid_t branch_qualifier, XID *xid)
     uuid_t uuid_obj;
     
     xid->formatID = LIXA_XID_FORMAT_ID;
-    xid->gtrid_length = sizeof(uuid_t);
     xid->bqual_length = sizeof(uuid_t);
     /* this is not necessary, but... */
     memset(xid->data, 0, XIDDATASIZE);
     uuid_generate(uuid_obj);
     /* global transaction identifier */
-    memcpy(xid->data, uuid_obj, sizeof(uuid_t));
+    /* Copy in prefix if set */
+    if (gtrid_prefix_length > 0) {
+        memcpy(xid->data, gtrid_prefix, gtrid_prefix_length);
+        xid->gtrid_length = gtrid_prefix_length;
+    } else {
+        xid->gtrid_length = 0;
+    }
+    /* Append UUID to gtrid */
+    memcpy(xid->data + xid->gtrid_length, uuid_obj, sizeof(uuid_t));
+    xid->gtrid_length += sizeof(uuid_t);
     /* branch qualifier */
     if (NULL == branch_qualifier) {
         /* this is used by TX */
-        memcpy(xid->data + sizeof(uuid_t),
+        memcpy(xid->data + xid->gtrid_length,
                lixa_xid_global_bqual, sizeof(uuid_t));
     } else {
         /* this is used by XTA */
-        memcpy(xid->data + sizeof(uuid_t),
+        memcpy(xid->data + xid->gtrid_length,
                branch_qualifier, sizeof(uuid_t));
     }
 #ifdef LIXA_DEBUG
